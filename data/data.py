@@ -1,15 +1,13 @@
 from torch.utils.data import Dataset
-import random
+#from datasets import load_dataset
 import torch
 import numpy as np
 from typing import DefaultDict,Dict
 import json
-import gzip
-import pickle
 from typing import Tuple, List
 from .data_utils import InputExample
 from tqdm import tqdm
-from datasets import load_dataset
+
 # We create a custom MS MARCO dataset that returns triplets (query, positive, negative)
 # on-the-fly based on the information from the mined-hard-negatives jsonl file.
 ce_threshold = -3
@@ -42,6 +40,7 @@ def getLLamaCorpusEmbds(path:str ="/expanse/lustre/projects/csb176/yzound/datase
     embds = np.memmap(path,dtype='float32', mode='r', shape=(MSMARCO_DOC_SZ, 4096))
     return embds
 
+'''
 def getTevaronSamples(num_neg:int=1)->list:
     triples = []
     ds = load_dataset("Tevatron/msmarco-passage")["train"]
@@ -52,7 +51,7 @@ def getTevaronSamples(num_neg:int=1)->list:
         for i in range(num_neg):
             triples[-1].append(int(sample["negative_passages"][i]["docid"]))
     return triples
-
+'''
 def getMSMARCOCorpus(collection:str = "/expanse/lustre/projects/csb176/yzound/datasets/msmarco/collection.tsv")->Dict[int,str]:
     corpus = DefaultDict()
     with open(collection, 'r', encoding='utf8') as fIn:
@@ -71,9 +70,11 @@ def getMSMARCOQuery(path:str = "/expanse/lustre/projects/csb176/yzound/datasets/
             queries[qid] = query
     return queries
 
-def getMSMARCOCEscore(path:str = "/expanse/lustre/projects/csb176/yzound/datasets/msmarco/ce_score/cross-encoder-ms-marco-MiniLM-L-6-v2-scores.pkl.gz") -> Dict[int,Dict[int,float]]:
-    with gzip.open(path, 'rb') as fIn:
-        ce_scores = pickle.load(fIn)
+def getMSMARCOCEscore(path:str = "/expanse/lustre/projects/csb176/yzound/datasets/msmarco/ce_score/cross-encoder-ms-marco-MiniLM-L-6-v2-scores.pkl.gz") ->List[Dict]:
+    ce_scores = []
+    with open(path, 'r') as fIn:
+        for line in fIn:
+            ce_scores.append(json.loads(line.strip()))
     return ce_scores
 
 def getSpladeHN(queries_texts:Dict[int,str],path:str = "/expanse/lustre/projects/csb185/yifanq/msmarco/train_queries_distill_splade_colbert_0.json"):
@@ -105,25 +106,30 @@ def getSpladeHN(queries_texts:Dict[int,str],path:str = "/expanse/lustre/projects
     return train_queries
 
 class MSMARCODataset(Dataset):
-    def __init__(self, dataset, queries, corpus, ce_scores, num_of_neg):
-        self.queries = queries
+    def __init__(self, corpus, ce_scores, num_of_neg):
+        #self.queries = queries
         self.corpus = corpus
         self.ce_scores = ce_scores
         self.num_neg = num_of_neg
-        self.dataset = dataset
+        #self.dataset = dataset
 
     def __getitem__(self, index):
-        sample = self.dataset[index]
-        query = self.queries[int(sample['query'])]
-        passage = [self.corpus[int(sample['positive'])]]
-        scores = [self.ce_scores[int(sample['query'])][int(sample['positive'])]]
-        for i in range(self.num_neg):
-            passage.append(self.corpus[int(sample[f'negative_{i+1}'])])
-            scores.append(self.ce_scores[int(sample['query'])][int(sample[f'negative_{i+1}'])])
-        return {'query':query,'passage':passage,'label':0,'ce_scores':np.array(scores,dtype='float32')} #making sure is wont create double
+        scores = [self.ce_scores[index]['pos_score']]
+        pos_pid = self.ce_scores[index]['pos_pid']
+        #sample = self.dataset[index]
+        #query = self.queries[int(sample['query'])]
+        passage = [self.corpus[int(pos_pid)]]
+        scores += self.ce_scores[index]['neg_scores'][:self.num_neg]
+        passage += list(map(lambda s:self.corpus[int(s)],self.ce_scores[index]['neg_pids'][:self.num_neg]))
+        #scores = [self.ce_scores[int(sample['query'])][int(sample['positive'])]]
+        #scores = [self.ce_scores[index]['pos_score']]
+        #for i in range(self.num_neg):
+        #    passage.append()
+        #   scores.append(self.ce_scores[int(sample['query'])][int(sample[f'negative_{i+1}'])])
+        return {'query':self.ce_scores[index]['question'],'passage':passage,'label':0,'ce_scores':np.array(scores,dtype='float32')} #making sure is wont create double
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.ce_scores)
 
 '''
 Each example in this dataset passes an extra embeddings to the trained model

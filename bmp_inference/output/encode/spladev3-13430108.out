@@ -1,0 +1,8 @@
+dbpedia-entity
+dbpedia-entity average document length 113.90864255265727, overflow 0.0
+encoding dbpedia-entity queries
+dbpedia-entity average query length: 27.012847965738757
+fever
+fever average document length 128.79941653091035, overflow 0.0
+encoding fever queries
+fever average query length: 3.302780529794871

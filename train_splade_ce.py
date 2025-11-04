@@ -1,17 +1,21 @@
-from transformers import AutoTokenizer, BertForMaskedLM
+from transformers import AutoTokenizer, BertForMaskedLM, AutoConfig
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from data.data import *
 from torch.utils.data import DataLoader
-from transformer_model.models import AutoModelForMaskedLMUntie
+from accelerate import Accelerator, load_checkpoint_and_dispatch
+from datasets import load_dataset
 import torch
 import argparse
 import tqdm
 from loss import *
 import transformers
 import os
-from accelerate import Accelerator, load_checkpoint_and_dispatch
-from accelerate.utils import DistributedDataParallelKwargs
+from torch.distributed.fsdp.fully_sharded_data_parallel import FullOptimStateDictConfig, FullStateDictConfig
+
+
+from accelerate.utils import DistributedDataParallelKwargs, FullyShardedDataParallelPlugin
+import wandb
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -23,29 +27,23 @@ def get_args():
     parser.add_argument('--steps',type=int,default=0)
     parser.add_argument('--epoch',type=int,default=5)
     parser.add_argument('--gradient_accum',type=int,default=4)
-    parser.add_argument('--batchsize',type=int,default=128)
+    parser.add_argument('--per_device_batch_size',type=int,default=64) #per device batch size
     args = parser.parse_args()
     return args
 
-def train(accelerator, epochs:int,checkpoint:str,documentModel:str,save_path:str,batchsz:int=32,save_steps:int=20000,global_steps:int=0,warmup_steps:int = 2000,lambda_q:int = 0.01,lambda_d:int = 0.008,use_untie:bool = False):
+def train(accelerator, epochs:int,checkpoint:str,documentModel:str,save_path:str,batchsz:int=32,save_steps:int=20000,global_steps:int=0,warmup_steps:int = 4000,lambda_q:int = 0.01,lambda_d:int = 0.008,use_untie:bool = False):
     device = accelerator.device
-    ce_scores = getMSMARCOCEscore()
+    ce_scores = getMSMARCOCEscore(path="/projects/bcgk/yzound/datasets/msmarco/msmarco_train_teacher_scores.jsonl")
     num_of_neg = 5
-    corpus = getMSMARCOCorpus()
-    queries = getMSMARCOQuery()
-    #training_samples = getTevaronSamples()
-    training_samples = load_dataset("sentence-transformers/msmarco-bm25","triplet-50-ids")["train"]
-    '''
-    device_map = {
-    "bert.embeddings": 1,
-    "bert.encoder":0,
-    "bert.pooler":0,
-    "cls": 1,
-    }
-    '''
-    mini_batchsz = batchsz 
-    model = BertForMaskedLM.from_pretrained(documentModel)
+    corpus = getMSMARCOCorpus("/projects/bcgk/zwang48/sclr/msmarco-full/collection.tsv")
+    #config = AutoConfig.from_pretrained(documentModel)
+    #config.tie_word_embeddings = False
+    
+    per_device_batch_size = batchsz // args.gradient_accum
+    model = BertForMaskedLM.from_pretrained(documentModel)#,config=config)
+    #model.tie_weights()
     tokenizer = AutoTokenizer.from_pretrained(documentModel)
+    tokenizer.save_pretrained(save_path)
     if use_untie:
         print("*******************\nuntie the model embeddings..\n*******************",flush=True)
         untied_embds = torch.nn.Embedding(len(tokenizer.vocab),768)
@@ -54,50 +52,59 @@ def train(accelerator, epochs:int,checkpoint:str,documentModel:str,save_path:str
     if len(checkpoint) > 0:
         model.load_state_dict(torch.load(os.path.join(checkpoint),weights_only=True))
     model.to(device)
-    dataset = MSMARCODataset(dataset=training_samples,queries=queries,corpus=corpus,ce_scores=ce_scores,num_of_neg=num_of_neg)
-    train_dataloader = DataLoader(dataset, shuffle=True, batch_size=mini_batchsz, drop_last=True)
-    optimizer = transformers.AdamW(model.parameters(),lr=3e-5)#torch.optim.AdamW(model.parameters(),lr=4e-6)
+    dataset = MSMARCODataset(corpus=corpus,ce_scores=ce_scores,num_of_neg=num_of_neg)
+    train_dataloader = DataLoader(dataset, shuffle=True, batch_size=per_device_batch_size, drop_last=True, num_workers=accelerator.num_processes)
+    lr = 1e-5
+    scheduler_ratiuo = 0.001
+    #print(per_device_batch_size)
+    #print(len(train_dataloader))
+    optimizer = torch.optim.AdamW(model.parameters(),lr=lr)#torch.optim.AdamW(model.parameters(),lr=4e-6)
     # step不能太高 3e-4会直接不动
     total_steps = len(dataset) // batchsz
-    scheduler = transformers.get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps*epochs)
-    flopsSchedulerD = RegWeightScheduler(lambda_=2e-2,T=5*total_steps//accelerator.num_processes) # after finish 10% epoch, the lambda will reach to 2e-2 epochs*total_len//10
-    flopsSchedulerQ = RegWeightScheduler(lambda_=2e-2,T=5*total_steps//accelerator.num_processes)
+    scheduler = transformers.get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(total_steps*epochs*0.01), num_training_steps=total_steps*epochs)
+    accelerator.init_trackers(
+        #name="spladeV3-3e-5-hn-8",
+        project_name="splade qat",
+        config={
+            'model_config': model.config,
+            'lr': lr,
+            'batchsize':per_device_batch_size * args.gradient_accum * accelerator.state.num_processes,
+            'epoch': epochs,
+            'location': args.save_path
+        }
+        , init_kwargs={"wandb":{"name":"spladeV3-3e-5-hn-8"}}
+    )
     #loss_fct= torch.nn.CrossEntropyLoss()
-    loss_fct = torch.nn.KLDivLoss(reduction="batchmean")
-    #loss_fct = torch.nn.MSELoss()
+    loss_fct1 = torch.nn.KLDivLoss(reduction="batchmean")
+    loss_fct2 = torch.nn.MSELoss()
     flops = FLOPS()
     steps = global_steps
     train_dataloader,model,optimizer= accelerator.prepare(train_dataloader,model,optimizer)
+    # print(len(train_dataloader))
     scheduler = accelerator.prepare_scheduler(scheduler)
+    flopsSchedulerD = RegWeightScheduler(lambda_=0.005,T=int(scheduler_ratiuo*epochs*len(train_dataloader))) # after finish 10% epoch, the lambda will reach to max epochs*total_len//10
+    flopsSchedulerQ = RegWeightScheduler(lambda_=0.02,T=int(scheduler_ratiuo*epochs*len(train_dataloader)))
     for epoch in range(epochs):
         for batch in (pbar:=tqdm.tqdm(train_dataloader,desc=f"epoch {epoch}", disable=not accelerator.is_local_main_process)):
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 queries = batch['query']
                 passages = batch['passage']
-                scores = batch['ce_scores'].to(device)
+                scores = batch['ce_scores']
                 #labels = torch.zeros(batchsz//accum_steps,dtype=torch.long,device=device)
-                query_tokens = tokenizer(queries,padding=True,truncation='longest_first',return_tensors='pt').to(device)
+                query_tokens = tokenizer(queries,padding=True,truncation='longest_first',return_tensors='pt',max_length=256).to(device)
                 qfeature = model(**query_tokens)["logits"]
-                qfeature = torch.max(torch.log(1 + torch.relu(qfeature)) * query_tokens.attention_mask.unsqueeze(-1), dim=1).values
-                '''
-                doc_pos_tokens = tokenizer(doc_pos,padding=True,truncation='longest_first',return_tensors='pt').to(device)
-                pos_feature = model(**doc_pos_tokens)["logits"]
-                pos_feature = torch.max(torch.log(1 + torch.relu(pos_feature)) * doc_pos_tokens.attention_mask.unsqueeze(-1), dim=1).values
-                pos_score = torch.matmul(q,torch.transpose(pos_feature,0,1))
-                doc_neg_tokens = tokenizer(doc_neg,padding=True,truncation='longest_first',return_tensors='pt').to(device)
-                neg_feature = model(**doc_neg_tokens)["logits"]
-                neg_feature = torch.max(torch.log(1 + torch.relu(neg_feature)) * doc_neg_tokens.attention_mask.unsqueeze(-1), dim=1).values
-                neg_score = dot(q,neg_feature)
-                '''
+                qfeature = torch.log(torch.relu(torch.max(qfeature + ( 1 - query_tokens.attention_mask.unsqueeze(-1)) * -1e6, dim=1)[0]) + 1) #save memory
+                #qfeature = torch.max(torch.log(1 + torch.relu(qfeature)) * query_tokens.attention_mask.unsqueeze(-1), dim=1).values
                 predict = []
                 flops_doc = 0
                 #print(len(passages))
                 for i in range(len(passages)):
                     input = passages[i]
-                    tokens = tokenizer(input,padding=True,truncation='longest_first',return_tensors='pt').to(device)
+                    tokens = tokenizer(input,padding=True,truncation='longest_first',return_tensors='pt',max_length=256).to(device)
                     feature = model(**tokens)["logits"]
-                    feature = torch.max(torch.log(1 + torch.relu(feature)) * tokens.attention_mask.unsqueeze(-1), dim=1).values
+                    feature = torch.log(torch.relu(torch.max(feature + ( 1 - tokens.attention_mask.unsqueeze(-1)) * -1e6, dim=1)[0]) + 1)
+                    #feature = torch.max(torch.log(1 + torch.relu(feature)) * tokens.attention_mask.unsqueeze(-1), dim=1).values
                     predict.append(dot(qfeature,feature).unsqueeze(-1))
                     flops_doc += flopsSchedulerD.get_lambda() * flops(feature)
                 #print(predict)
@@ -108,42 +115,39 @@ def train(accelerator, epochs:int,checkpoint:str,documentModel:str,save_path:str
                 predict = torch.nn.functional.log_softmax(predict,dim=-1)
                 scores = torch.nn.functional.softmax(scores,dim=-1)
                 
-                #loss = loss_fct(predict[:,0]-predict[:,1],scores[:,0]-scores[:,1])
-                loss = loss_fct(predict,scores)
+                mse_loss = loss_fct2(predict[:,0]-predict[:,1],scores[:,0]-scores[:,1])
+                kl_loss = loss_fct1(predict,scores)
                 flops_doc = flops_doc / (num_of_neg + 1)
                 flops_query = flopsSchedulerQ.get_lambda() * flops(qfeature)
-                loss = loss + flops_doc + flops_query
-                #(loss/accum_steps).backward()
+                loss = kl_loss + 0.05 * mse_loss + flops_doc + flops_query
                 accelerator.backward(loss)
-                steps += 1
+                if steps % 100 == 0:
+                    pbar.set_postfix_str(f"loss: {loss.item()}, d_flops: {flopsSchedulerD.get_lambda()}")
+                    accelerator.log({"loss":loss.item(),'kl_loss':kl_loss.item(),'mse_loss':mse_loss.item(),'flops_doc':flops_doc.item(),'flops_query':flops_query.item(),'learning rate':optimizer.param_groups[0]['lr'],'flops_q_weight':flopsSchedulerQ.get_lambda(),'flops_d_weight':flopsSchedulerD.get_lambda()},step=steps)
+                if steps !=0 and steps % save_steps == 0 and accelerator.is_main_process:
+                    #accelerator.wait_for_everyone()
+                    #print("saved")
+                    out_index_dir = os.path.join(save_path,f"{steps}")
+                    os.makedirs(out_index_dir, exist_ok=True)
+                    accelerator.unwrap_model(model).save_pretrained(out_index_dir,is_main_process=accelerator.is_main_process,save_function=accelerator.save,state_dict=accelerator.get_state_dict(model))
                 optimizer.step()
                 scheduler.step()
                 flopsSchedulerQ.step()
                 flopsSchedulerD.step()
-                if steps % 100 == 0:
-                    pbar.set_postfix_str(f"loss: {loss.item()}, d_flops: {flopsSchedulerD.get_lambda()}")
-                if steps % save_steps == 0 and accelerator.is_main_process:
-                    #accelerator.wait_for_everyone()
-                    path = os.path.join(save_path,f"{steps}")
-                    if not os.path.exists(path):
-                        os.mkdir(path)
-                    accelerator.unwrap_model(model).save_pretrained(os.path.join(path,"spladeOrignal"),is_main_process=accelerator.is_main_process,save_function=accelerator.save)
+                steps += 1
     #accelerator.wait_for_everyone()
-    accelerator.unwrap_model(model).save_pretrained(os.path.join(save_path,"spladeOrignal"),is_main_process=accelerator.is_main_process,save_function=accelerator.save)
+    accelerator.unwrap_model(model).save_pretrained(save_path,is_main_process=accelerator.is_main_process,save_function=accelerator.save,state_dict=accelerator.get_state_dict(model))
+    accelerator.end_training()
     print("model save to {}".format(os.path.join(save_path,"model_state_dict.pt")))
-
-#torch DDP
-def run(rank, world_size,args):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    torch.distributed.init_process_group("gloo", rank=rank, world_size=world_size)
-    train(batchsz=args.batchsize,epochs=args.epoch,checkpoint=args.checkpoint, documentModel=args.docModel,queryModel=args.queryModel,global_steps=args.steps,save_path=args.save_path,use_untie_model=args.use_untie)
-    torch.distributed.destroy_process_group()
 
 if __name__ == "__main__":
     args = get_args()
-    accelerator = Accelerator(mixed_precision="fp16",gradient_accumulation_steps=args.gradient_accum,kwargs_handlers=[DistributedDataParallelKwargs(broadcast_buffers=False)])
-    train(accelerator= accelerator, batchsz=args.batchsize//args.gradient_accum,epochs=args.epoch,checkpoint=args.checkpoint, documentModel=args.docModel,global_steps=args.steps,save_path=args.save_path,use_untie=args.use_untie)
+    fsdp_plugin = FullyShardedDataParallelPlugin(
+        state_dict_config=FullStateDictConfig(offload_to_cpu=False, rank0_only=False),
+        optim_state_dict_config=FullOptimStateDictConfig(offload_to_cpu=False, rank0_only=False),
+    )
+    accelerator = Accelerator(log_with="wandb",mixed_precision="fp16",gradient_accumulation_steps=args.gradient_accum,kwargs_handlers=[DistributedDataParallelKwargs(broadcast_buffers=False)])#,fsdp_plugin=fsdp_plugin)
+    train(accelerator= accelerator, batchsz=args.per_device_batch_size,epochs=args.epoch,checkpoint=args.checkpoint, documentModel=args.docModel,global_steps=args.steps,save_path=args.save_path,use_untie=args.use_untie)
     #n_gpus = torch.cuda.device_count()
     #world_size = n_gpus//2
     #mp.spawn(run,args=(world_size,args),nprocs=world_size,join=True)

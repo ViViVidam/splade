@@ -1,36 +1,38 @@
 #!/bin/bash
-#SBATCH -A csb176
-#SBATCH --job-name="splade test training"
-#SBATCH --output="./output/fusion/splade_test-%j.out"
-#SBATCH --error="./output/fusion/splade_test-%j.err"
-#SBATCH --partition=gpu-shared
+#SBATCH -A bcgk-delta-gpu
+#SBATCH --job-name="inference splade V3"
+#SBATCH --output="./output/inference/spladev3-%j.out"
+#SBATCH --error="./output/inference/spladev3-%j.err"
+#SBATCH --partition=gpuA40x4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
 #SBATCH --no-requeue
 #SBATCH --gpus=1
-#SBATCH --mem-per-gpu=96G
-#SBATCH -t 48:00:00
+#SBATCH --mem=196G
+#SBATCH -t 30:00:00
 
-module purge
-module load gpu
-module load slurm
+module load cuda/12.4.0
 
 # load conda env variables
-# loading the profile of user yzound to inject require functions
-__conda_setup="$('/home/yzound/miniconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
+# loading the profile of user zwang48 to inject require functions
+__conda_setup="$('/u/yzound/miniconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
 if [ $? -eq 0 ]; then
     eval "$__conda_setup"
 else
-    if [ -f "/home/yzound/miniconda3/etc/profile.d/conda.sh" ]; then
-        . "/home/yzound/miniconda3/profile.d/conda.sh"
+    if [ -f "/u/yzound/miniconda3/etc/profile.d/conda.sh" ]; then
+        . "/u/yzound/miniconda3/profile.d/conda.sh"
     else
-        export PATH="/home/yzound/miniconda3/bin:$PATH"
+        export PATH="/u/yzound/miniconda3/bin:$PATH"
     fi
 fi
 unset __conda_setup
-
 conda activate ML
 
-# /bin/bash -c "python -m main --save_path /expanse/lustre/projects/csb176/yzound/checkpoint/splade/splade2model/tie/ --steps 9000"
-/bin/bash -c "python -m test"
-# /bin/bash -c "python -m trainAvgPool --save_path /expanse/lustre/projects/csb176/yzound/checkpoint/splade/splade2model/avgPool/"
+python indexing.py --model naver/splade-cocondenser-selfdistil \
+    --index_dir /projects/bfcj/yzound/index/splade_selfdistil \
+    --corpus_path /projects/bcgk/zwang48/sclr/msmarco-full/collection.tsv 
+
+python evaluate.py --model naver/splade-cocondenser-selfdistil \
+    --index_dir /projects/bfcj/yzound/index/splade_selfdistil \
+    --query_path /projects/bcgk/yzound/datasets/msmarco/queries.train.tsv

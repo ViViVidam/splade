@@ -1,0 +1,32 @@
+arguana
+arguana average document length 209.7710398893244, overflow 0.0
+encoding arguana queries
+arguana average query length: 212.31436699857753
+fiqa
+fiqa average document length 165.3979492695791, overflow 0.0
+encoding fiqa queries
+fiqa average query length: 4.317388688327316
+nfcorpus
+nfcorpus average document length 221.62537847508946, overflow 0.0
+encoding nfcorpus queries
+nfcorpus average query length: 2.6651220265678095
+quora
+quora average document length 45.64685780724417, overflow 0.0
+encoding quora queries
+quora average query length: 28.017933333333332
+scidocs
+scidocs average document length 207.76926374868458, overflow 0.0
+encoding scidocs queries
+scidocs average query length: 63.735
+scifact
+scifact average document length 231.42793748794134, overflow 0.0
+encoding scifact queries
+scifact average query length: 24.044183949504056
+trec-covid
+trec-covid average document length 191.2082156281372, overflow 0.0
+encoding trec-covid queries
+trec-covid average query length: 45.66
+webis-touche2020
+webis-touche2020 average document length 180.66443686363695, overflow 0.0
+encoding webis-touche2020 queries
+webis-touche2020 average query length: 34.38775510204081

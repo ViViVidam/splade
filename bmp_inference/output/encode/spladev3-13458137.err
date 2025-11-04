@@ -1,0 +1,24 @@
+Traceback (most recent call last):
+  File "/u/yzound/miniconda3/envs/ML/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/u/yzound/miniconda3/envs/ML/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/u/yzound/splade/bmp_inference/inference_all_beir_doc_bmp.py", line 36, in <module>
+    os.makedirs(out_dir)
+  File "/u/yzound/miniconda3/envs/ML/lib/python3.10/os.py", line 225, in makedirs
+    mkdir(name, mode)
+FileExistsError: [Errno 17] File exists: '/work/hdd/bfcj/yzound/index/beir/splade-cocondenser-ensembledistil/'
+Traceback (most recent call last):
+  File "/u/yzound/miniconda3/envs/ML/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/u/yzound/miniconda3/envs/ML/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/u/yzound/splade/bmp_inference/inference_all_beir_queries_bmp.py", line 40, in <module>
+    model = BertForMaskedLM.from_pretrained(args.model).to(device)
+  File "/u/yzound/miniconda3/envs/ML/lib/python3.10/site-packages/transformers/modeling_utils.py", line 277, in _wrapper
+    return func(*args, **kwargs)
+  File "/u/yzound/miniconda3/envs/ML/lib/python3.10/site-packages/transformers/modeling_utils.py", line 4900, in from_pretrained
+    checkpoint_files, sharded_metadata = _get_resolved_checkpoint_files(
+  File "/u/yzound/miniconda3/envs/ML/lib/python3.10/site-packages/transformers/modeling_utils.py", line 989, in _get_resolved_checkpoint_files
+    raise OSError(
+OSError: Error no file named pytorch_model.bin, model.safetensors, tf_model.h5, model.ckpt.index or flax_model.msgpack found in directory /projects/bfcj/yzound/checkpoint/splade-cocondenser-ensembledistil-qat/.
